@@ -20,7 +20,7 @@ from .templates import template_catalog, get_template, TEMPLATES
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "frontend")
 PAGES = ["index", "wallet", "txpool", "explorer", "deploy", "interact",
-         "nodes", "network", "stats", "admin", "templates"]
+         "nodes", "network", "probes", "stats", "admin", "templates"]
 
 
 def _json(payload, status=200):
@@ -138,6 +138,36 @@ def create_app(node):
     def trigger_sync():
         summary = node.sync_with_peers()
         return _json({"ok": True, "summary": summary})
+
+    # ================================================================== #
+    # Neighbour reachability probes
+    # ================================================================== #
+    @app.get("/api/network/probes")
+    def probe_status():
+        """Current probe stats + recent history for every known peer."""
+        return _json({"peers": [p.probe_summary() for p in node.peers.all()]})
+
+    @app.post("/api/network/probe")
+    def probe_now():
+        """Trigger a probe round: one peer when host/port given, else all."""
+        from .p2p import probe_peer, probe_all
+        data = request.get_json(force=True, silent=True) or {}
+        host, port = data.get("host"), data.get("port")
+        if host is not None and port is not None:
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                return _json({"ok": False, "error": "invalid port"}, 400)
+            peer = node.peers.by_key(host, port)
+            if not peer:
+                return _json({"ok": False, "error": "peer not found"}, 404)
+            ok, _entry = probe_peer(peer)
+            return _json({"ok": True, "reachable": ok,
+                          "peer": peer.probe_summary()})
+        peers = node.peers.all()
+        probe_all(peers)
+        return _json({"ok": True,
+                      "peers": [p.probe_summary() for p in peers]})
 
     # ================================================================== #
     # Wallet

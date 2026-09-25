@@ -7,11 +7,13 @@ peer; conflict resolution happens on the receiving node via the blockchain's
 fork/reorg rules rather than by trusting the sender.
 """
 
+import threading
 import time
+from collections import deque
 
 import requests
 
-from .config import PEER_DIAL_TIMEOUT
+from .config import PEER_DIAL_TIMEOUT, PROBE_HISTORY_LIMIT
 
 # Message type tags used for logging / UI.
 MSG_STATUS = "status"
@@ -34,6 +36,36 @@ class Peer:
         self.last_seen = 0
         self.latency_ms = None
         self.last_error = None
+        # Reachability probe bookkeeping: a bounded history of recent probes
+        # plus lifetime counters, feeding the probe dashboard.
+        self.probe_history = deque(maxlen=PROBE_HISTORY_LIMIT)
+        self.probe_total = 0
+        self.probe_failures = 0
+
+    def probe_summary(self):
+        """Aggregated reachability stats + recent history for the dashboard."""
+        history = list(self.probe_history)
+        latencies = [h["latency_ms"] for h in history
+                     if h["ok"] and h["latency_ms"] is not None]
+        window_failures = sum(1 for h in history if not h["ok"])
+        return {
+            "id": self.id,
+            "host": self.host,
+            "port": self.port,
+            "url": self.url,
+            "status": self.status,
+            "reachable": self.status == "up",
+            "last_latency_ms": self.latency_ms,
+            "avg_latency_ms": (round(sum(latencies) / len(latencies), 1)
+                               if latencies else None),
+            "window": len(history),
+            "window_failures": window_failures,
+            "total_probes": self.probe_total,
+            "total_failures": self.probe_failures,
+            "last_probe_at": history[-1]["time"] if history else None,
+            "last_error": self.last_error,
+            "history": history,
+        }
 
     def to_dict(self):
         return {
@@ -88,11 +120,11 @@ def http_post_json(url, payload, timeout=PEER_DIAL_TIMEOUT):
     return resp.json()
 
 
-def dial_peer(peer):
+def dial_peer(peer, timeout=PEER_DIAL_TIMEOUT):
     """Fetch a peer's status, updating its bookkeeping fields."""
     started = time.time()
     try:
-        data = http_get_json(f"{peer.url}/p2p/status", timeout=PEER_DIAL_TIMEOUT)
+        data = http_get_json(f"{peer.url}/p2p/status", timeout=timeout)
         peer.status = "up"
         peer.height = data.get("height")
         peer.head_hash = data.get("head_hash")
@@ -107,3 +139,35 @@ def dial_peer(peer):
         peer.latency_ms = None
         peer.last_error = str(e)[:200]
         return False, {"error": str(e)}
+
+
+def probe_peer(peer, timeout=PEER_DIAL_TIMEOUT):
+    """Run one reachability probe against ``peer`` and record the outcome.
+
+    Reuses :func:`dial_peer` so the peer's status/height/latency stay
+    consistent with the rest of the UI, then appends the result to the
+    peer's bounded probe history.  Returns ``(ok, entry)``.
+    """
+    ok, _data = dial_peer(peer, timeout=timeout)
+    entry = {
+        "time": time.time(),
+        "ok": ok,
+        "latency_ms": peer.latency_ms if ok else None,
+        "error": None if ok else peer.last_error,
+    }
+    peer.probe_history.append(entry)
+    peer.probe_total += 1
+    if not ok:
+        peer.probe_failures += 1
+    return ok, entry
+
+
+def probe_all(peers, timeout=PEER_DIAL_TIMEOUT):
+    """Probe every peer concurrently so one slow peer can't stall the rest."""
+    threads = [threading.Thread(target=probe_peer, args=(p, timeout),
+                                daemon=True)
+               for p in peers]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()

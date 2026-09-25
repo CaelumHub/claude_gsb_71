@@ -252,3 +252,17 @@ pre.code { margin: 0; font-family: var(--mono); font-size: 12.5px; overflow: aut
 .pill-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .chart { width: 100%; height: 300px; }
 .mono-num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ---------- Neighbour probe dashboard ---------- */
+tr.peer-down td { background: rgba(248,113,113,.06); }
+tr.peer-down td:first-child { box-shadow: inset 3px 0 0 var(--red); }
+tr.peer-down .mono { color: var(--faint); }
+.spark { display: inline-block; vertical-align: middle; }
+.spark svg { display: block; width: 140px; height: 34px; }
+.spark-none { color: var(--faint); font-size: 12px; }
+.probe-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 3px; }
+.probe-dot.ok { background: var(--green); }
+.probe-dot.fail { background: var(--red); }
+.probe-ctl { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.probe-ctl select { width: auto; padding: 7px 10px; }

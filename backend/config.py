@@ -29,6 +29,7 @@ PEER_DIAL_TIMEOUT = 3                 # seconds before a peer is marked down
 SYNC_BATCH = 200                      # max blocks transferred per sync request
 BROADCAST_TIMEOUT = 3
 MAX_PEERS = 64
+PROBE_HISTORY_LIMIT = 30              # probe results retained per peer
 
 # ---------------------------------------------------------------------------
 # Storage layout (relative to a node's data directory)

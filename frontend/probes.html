@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>邻居可达性探测 · LightChain</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside id="sidebar"></aside>
+  <div class="main">
+    <header id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <h1>邻居可达性探测</h1>
+        <p>探测每个 P2P 邻居的在线状态与响应延迟，累计平均延迟、失败次数并保留历史趋势。</p>
+      </div>
+
+      <div class="grid cols-4">
+        <div class="card stat accent"><div class="label">邻居总数</div><div class="value" id="stTotal">—</div></div>
+        <div class="card stat green"><div class="label">在线</div><div class="value" id="stUp">—</div></div>
+        <div class="card stat amber"><div class="label">不可达</div><div class="value" id="stDown">—</div></div>
+        <div class="card stat purple"><div class="label">平均延迟（在线邻居）</div><div class="value" id="stAvg">—</div></div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <div class="probe-ctl">
+          <button class="btn primary" id="btnProbeAll" onclick="probeAll()">🔍 立即探测全部</button>
+          <label class="muted small" for="autoRefresh">自动刷新</label>
+          <select id="autoRefresh" onchange="setAuto(this.value)">
+            <option value="0">关闭</option>
+            <option value="5">每 5 秒</option>
+            <option value="10" selected>每 10 秒</option>
+            <option value="30">每 30 秒</option>
+          </select>
+          <div class="spacer"></div>
+          <span class="hint" id="lastRound"></span>
+        </div>
+        <div class="hint" style="margin-top:8px;">
+          探测通过邻居的 <span class="mono">/p2p/status</span> 完成，超时即记为不可达；
+          历史趋势中绿点为成功探测（高度为延迟），红点为失败探测。
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <div class="flex">
+          <h2 style="margin:0;">邻居探测结果</h2>
+          <div class="spacer"></div>
+          <button class="btn ghost sm" onclick="loadProbes()">刷新</button>
+        </div>
+        <div id="probeTable" class="table-wrap" style="margin-top:12px;"></div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/app.js"></script>
+<script>
+window.PAGE = "probes";
+
+let PEERS = [];
+let autoTimer = null;
+let probing = false;
+
+async function init() {
+  await loadProbes();          // 先展示已累积的历史
+  await probeAll();            // 页面打开即进行一轮新鲜探测
+  setAuto($("#autoRefresh").value);
+  pollStatus(8000);
+}
+
+async function loadProbes() {
+  const d = await API.get("/api/network/probes");
+  PEERS = d.peers || [];
+  render();
+}
+
+async function probeAll() {
+  if (probing) return;
+  probing = true;
+  const btn = $("#btnProbeAll");
+  btn.disabled = true;
+  try {
+    const d = await API.post("/api/network/probe", {});
+    PEERS = d.peers || [];
+    $("#lastRound").textContent = "上次全量探测：" + new Date().toLocaleTimeString();
+    render();
+  } catch (e) {
+    toast("探测失败: " + e.message, "err");
+  } finally {
+    probing = false;
+    btn.disabled = false;
+  }
+}
+
+async function probeOne(host, port) {
+  try {
+    const d = await API.post("/api/network/probe", { host, port });
+    const i = PEERS.findIndex(p => p.host === host && p.port === port);
+    if (i >= 0 && d.peer) PEERS[i] = d.peer;
+    render();
+    toast(d.reachable ? `${host}:${port} 可达，${d.peer.last_latency_ms} ms`
+                      : `${host}:${port} 不可达`,
+          d.reachable ? "ok" : "err");
+  } catch (e) {
+    toast("探测失败: " + e.message, "err");
+  }
+}
+
+function setAuto(sec) {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  sec = parseInt(sec);
+  if (sec > 0) autoTimer = setInterval(probeAll, sec * 1000);
+}
+
+/* ---------- rendering ---------- */
+
+function render() {
+  renderStats();
+  renderTable();
+}
+
+function renderStats() {
+  const up = PEERS.filter(p => p.reachable).length;
+  const down = PEERS.filter(p => p.status === "down").length;
+  const avgs = PEERS.filter(p => p.avg_latency_ms != null)
+                    .map(p => p.avg_latency_ms);
+  $("#stTotal").textContent = PEERS.length;
+  $("#stUp").textContent = up;
+  $("#stDown").textContent = down;
+  $("#stAvg").textContent = avgs.length
+    ? (avgs.reduce((a, b) => a + b, 0) / avgs.length).toFixed(1) + " ms" : "—";
+}
+
+function statusCell(p) {
+  if (p.reachable) return `<span class="badge green">● 在线</span>`;
+  if (p.status === "down") {
+    const err = p.last_error
+      ? `<div class="hint" style="margin-top:4px;">${esc(p.last_error.slice(0, 60))}</div>` : "";
+    return `<span class="badge red">✖ 不可达</span>${err}`;
+  }
+  return `<span class="badge gray">未知</span>`;
+}
+
+function sparkline(history) {
+  if (!history || !history.length)
+    return `<span class="spark-none">暂无探测记录</span>`;
+  const W = 140, H = 34, pad = 4;
+  const n = history.length;
+  const vals = history.filter(h => h.ok && h.latency_ms != null)
+                      .map(h => h.latency_ms);
+  const max = vals.length ? Math.max(...vals, 1) : 1;
+  const x = i => n === 1 ? W / 2 : pad + (W - 2 * pad) * i / (n - 1);
+  const y = v => H - pad - (H - 2 * pad) * (v / max);
+  const pts = [];
+  let marks = "";
+  history.forEach((h, i) => {
+    const t = new Date(h.time * 1000).toLocaleTimeString();
+    if (h.ok && h.latency_ms != null) {
+      pts.push(`${x(i).toFixed(1)},${y(h.latency_ms).toFixed(1)}`);
+      marks += `<circle cx="${x(i).toFixed(1)}" cy="${y(h.latency_ms).toFixed(1)}" r="1.8" fill="#34d399"><title>${t} · ${h.latency_ms} ms</title></circle>`;
+    } else {
+      marks += `<circle cx="${x(i).toFixed(1)}" cy="${H - pad}" r="2.4" fill="#f87171"><title>${t} · 探测失败${h.error ? "：" + esc(h.error.slice(0, 60)) : ""}</title></circle>`;
+    }
+  });
+  const line = pts.length > 1
+    ? `<polyline points="${pts.join(" ")}" fill="none" stroke="#34d399" stroke-width="1.6" stroke-linejoin="round"/>` : "";
+  return `<span class="spark"><svg viewBox="0 0 ${W} ${H}">${line}${marks}</svg></span>`;
+}
+
+function renderTable() {
+  const box = $("#probeTable");
+  if (!PEERS.length) {
+    box.innerHTML = `<div class="empty"><div class="big">🕸</div>暂无邻居节点，可在「网络设置」中添加</div>`;
+    return;
+  }
+  box.innerHTML = `<table><thead><tr>
+    <th>节点 ID</th><th>地址</th><th>状态</th><th>本次延迟</th>
+    <th>平均延迟（近 N 次）</th><th>失败（窗口/累计）</th><th>成功率</th>
+    <th>最近探测</th><th>历史趋势</th><th></th></tr></thead>
+    <tbody>${PEERS.map(p => {
+      const okCount = p.window - p.window_failures;
+      const rate = p.window ? Math.round(okCount / p.window * 100) + "%" : "—";
+      return `
+      <tr class="${p.status === 'down' ? 'peer-down' : ''}">
+        <td class="mono">${esc(p.id)}</td>
+        <td class="mono">${esc(p.url)}</td>
+        <td>${statusCell(p)}</td>
+        <td class="mono-num">${p.last_latency_ms != null ? p.last_latency_ms + ' ms' : '—'}</td>
+        <td class="mono-num">${p.avg_latency_ms != null ? p.avg_latency_ms + ' ms' : '—'}
+          <span class="hint">(${p.window} 次)</span></td>
+        <td class="mono-num">${p.window_failures} / ${p.total_failures}</td>
+        <td class="mono-num">${rate}</td>
+        <td class="muted small">${p.last_probe_at ? fmt.ago(p.last_probe_at) : '—'}</td>
+        <td>${sparkline(p.history)}</td>
+        <td><button class="btn ghost sm" onclick="probeOne('${p.host}',${p.port})">🔂 探测</button></td>
+      </tr>`;
+    }).join("")}</tbody></table>`;
+}
+
+document.addEventListener("DOMContentLoaded", init);
+</script>
+</body>
+</html>
