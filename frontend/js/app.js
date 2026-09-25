@@ -12,6 +12,7 @@ const NAV = [
   { key: "templates", href: "templates.html", ico: "📚", label: "合约模板库", group: "合约" },
   { key: "nodes", href: "nodes.html", ico: "🖥", label: "节点监控", group: "网络" },
   { key: "network", href: "network.html", ico: "🌐", label: "网络设置", group: "网络" },
+  { key: "reachability", href: "reachability.html", ico: "📶", label: "可达性探测", group: "网络" },
   { key: "stats", href: "stats.html", ico: "📊", label: "统计报表", group: "系统" },
   { key: "admin", href: "admin.html", ico: "🛠", label: "管理后台", group: "系统" },
 ];
@@ -25,6 +26,7 @@ const PAGE_TITLES = {
   templates: ["合约模板库", "预置合约模板，一键部署"],
   nodes: ["节点状态监控", "多节点状态与同步情况"],
   network: ["网络设置", "节点、端口与共识参数配置"],
+  reachability: ["邻居可达性探测", "邻居在线状态、延迟趋势与手动探测"],
   stats: ["统计报表", "出块、交易与难度可视化"],
   admin: ["管理后台", "链校验、回滚、重置与日志"],
 };

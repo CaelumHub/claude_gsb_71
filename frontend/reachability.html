@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>邻居可达性探测 · LightChain</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<style>
+  .probe-card { position: relative; border-left: 3px solid var(--border-2); }
+  .probe-card.up { border-left-color: var(--green); }
+  .probe-card.down { border-left-color: var(--red); background: linear-gradient(90deg, rgba(248,113,113,.06), var(--panel) 40%); }
+  .probe-card .err-line { color: var(--red); font-size: 12px; margin-top: 8px; word-break: break-all; }
+  .probe-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0; }
+  .probe-stats .cell { background: var(--panel-2); border-radius: 8px; padding: 8px 10px; }
+  .probe-stats .cell .k { font-size: 11px; color: var(--muted); }
+  .probe-stats .cell .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 15px; font-weight: 650; margin-top: 2px; }
+  .spark { width: 100%; height: 48px; display: block; background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; }
+  .spark-wrap { margin-top: 4px; }
+  .spark-cap { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--faint); margin-top: 3px; }
+  .chart-box svg { width: 100%; height: auto; display: block; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; }
+  .legend .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; margin-right: 6px; vertical-align: -1px; }
+  .switch-row { display: flex; align-items: center; gap: 8px; }
+  .switch-row input[type="checkbox"] { width: auto; }
+  select.narrow { max-width: 110px; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside id="sidebar"></aside>
+  <div class="main">
+    <header id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <h1>邻居可达性探测</h1>
+        <p>探测每个 P2P 邻居是否在线、响应有多快；累计平均延迟与失败次数，并保留最近探测历史以观察延迟走势。</p>
+      </div>
+
+      <div class="grid cols-4">
+        <div class="card stat accent"><div class="label">邻居总数</div><div class="value" id="stTotal">—</div></div>
+        <div class="card stat green"><div class="label">在线</div><div class="value" id="stUp">—</div></div>
+        <div class="card stat amber"><div class="label">不可达</div><div class="value" id="stDown">—</div></div>
+        <div class="card stat purple"><div class="label">累计探测</div><div class="value" id="stProbes">—</div></div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <div class="flex">
+          <h2 style="margin:0;">探测控制</h2>
+          <div class="spacer"></div>
+          <label class="switch-row">
+            <input type="checkbox" id="autoRefresh" onchange="applyAuto()"> 自动刷新
+          </label>
+          <select id="refreshInterval" class="narrow" onchange="applyAuto()">
+            <option value="3">每 3 秒</option>
+            <option value="5" selected>每 5 秒</option>
+            <option value="10">每 10 秒</option>
+            <option value="30">每 30 秒</option>
+          </select>
+          <button class="btn ghost sm" onclick="loadReport()">刷新数据</button>
+          <button class="btn primary sm" id="probeAllBtn" onclick="probeAll()">📡 立即探测全部</button>
+        </div>
+        <div class="hint" style="margin-top:10px;" id="lastRefresh">尚未探测。探测为只读健康检查，不影响节点状态展示与网络拓扑扫描。</div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h2>延迟走势 <span class="hint">（各邻居最近若干次探测，失败以红色刻度标记）</span></h2>
+        <div class="chart-box" id="trendChart"></div>
+        <div class="legend" id="trendLegend"></div>
+      </div>
+
+      <div id="peerCards" style="margin-top:16px;"></div>
+    </main>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/app.js"></script>
+<script>
+window.PAGE = "reachability";
+const PALETTE = ["#4f8cff", "#33c9a0", "#a06cff", "#f0b429", "#f87171", "#22d3ee", "#e879f9", "#a3e635"];
+let lastReport = null;
+let autoTimer = null;
+
+async function init() {
+  restoreAuto();
+  await loadReport();
+  applyAuto();
+  pollStatus(8000);
+}
+
+/* ---------- data loading ---------- */
+async function loadReport() {
+  try {
+    const d = await API.get("/api/network/probe");
+    render(d);
+  } catch (e) {
+    toast("加载探测数据失败: " + e.message, "err");
+  }
+}
+
+async function probeAll() {
+  const btn = $("#probeAllBtn");
+  btn.disabled = true;
+  btn.textContent = "探测中…";
+  try {
+    const d = await API.post("/api/network/probe");
+    render(d.report);
+    const fails = d.results.filter(r => !r.ok).length;
+    toast(fails ? `探测完成：${d.results.length - fails} 个在线，${fails} 个不可达`
+                : `探测完成：${d.results.length} 个邻居全部在线`,
+          fails ? "err" : "ok");
+  } catch (e) {
+    toast("探测失败: " + e.message, "err");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "📡 立即探测全部";
+  }
+}
+
+async function probeOne(host, port, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "探测中…"; }
+  try {
+    const d = await API.post(`/api/network/probe/${host}/${port}`);
+    render(d.report);
+    const r = d.result;
+    toast(r.ok ? `${r.id} 在线，延迟 ${r.latency_ms} ms`
+               : `${r.id} 不可达：${r.error}`, r.ok ? "ok" : "err");
+  } catch (e) {
+    toast("探测失败: " + e.message, "err");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "🔍 手动探测"; }
+  }
+}
+
+/* ---------- auto refresh ---------- */
+function applyAuto() {
+  const on = $("#autoRefresh").checked;
+  const sec = parseInt($("#refreshInterval").value, 10) || 5;
+  localStorage.setItem("lc_probe_auto", JSON.stringify({ on, sec }));
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  if (on) autoTimer = setInterval(probeAll, sec * 1000);
+}
+
+function restoreAuto() {
+  let cfg = null;
+  try { cfg = JSON.parse(localStorage.getItem("lc_probe_auto")); } catch (e) {}
+  if (cfg) {
+    $("#autoRefresh").checked = !!cfg.on;
+    if (cfg.sec) $("#refreshInterval").value = String(cfg.sec);
+  }
+}
+
+/* ---------- rendering ---------- */
+function render(d) {
+  lastReport = d;
+  $("#stTotal").textContent = d.total;
+  $("#stUp").textContent = d.up;
+  $("#stDown").textContent = d.down;
+  $("#stProbes").textContent = d.peers.reduce((a, p) => a + (p.probes || 0), 0);
+  $("#lastRefresh").textContent =
+    `最近更新：${fmt.time(d.generated_at)} · 每个邻居保留最近 ${d.history_limit} 次探测记录`;
+  renderTrend(d);
+  renderCards(d);
+}
+
+function renderCards(d) {
+  const box = $("#peerCards");
+  if (!d.peers.length) {
+    box.innerHTML = `<div class="card"><div class="empty"><div class="big">🕸</div>
+      暂无邻居节点，可在「网络设置」中添加</div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="grid cols-2">` + d.peers.map((p, i) => {
+    const color = PALETTE[i % PALETTE.length];
+    const state = !p.probed ? "unknown" : (p.reachable ? "up" : "down");
+    const badge = state === "up" ? `<span class="badge green">● 在线</span>`
+      : state === "down" ? `<span class="badge red">✖ 不可达</span>`
+      : `<span class="badge gray">未探测</span>`;
+    const okRate = p.probed && p.probes
+      ? (((p.probes - p.failures) / p.probes) * 100).toFixed(0) + "%" : "—";
+    return `
+    <div class="card probe-card ${state === "unknown" ? "" : state}">
+      <div class="flex">
+        ${badge}
+        <span class="mono" style="font-weight:700;">${esc(p.id)}</span>
+        <span class="mono muted small">${esc(p.url)}</span>
+        <div class="spacer"></div>
+        <button class="btn ghost sm" onclick="probeOne('${p.host}', ${p.port}, this)">🔍 手动探测</button>
+      </div>
+      <div class="probe-stats">
+        <div class="cell"><div class="k">本次延迟</div>
+          <div class="v" style="color:${state === "up" ? "var(--green)" : "inherit"};">
+            ${p.last_latency_ms != null && p.last_ok ? p.last_latency_ms + " ms" : "—"}</div></div>
+        <div class="cell"><div class="k">平均延迟（近 ${d.history_limit} 次）</div>
+          <div class="v">${p.avg_latency_ms != null ? p.avg_latency_ms + " ms" : "—"}</div></div>
+        <div class="cell"><div class="k">失败次数</div>
+          <div class="v" style="color:${p.failures ? "var(--red)" : "inherit"};">${p.failures ?? 0}</div></div>
+        <div class="cell"><div class="k">成功率</div>
+          <div class="v">${okRate}</div></div>
+      </div>
+      ${state === "down" ? `<div class="err-line">⚠ 最近错误：${esc(p.last_error || "未知错误")}</div>` : ""}
+      <div class="spark-wrap">
+        ${sparkline(p.history || [], color)}
+        <div class="spark-cap"><span>较早</span>
+          <span>上次探测：${p.last_probe_ts ? fmt.ago(p.last_probe_ts) : "—"}</span>
+          <span>最新</span></div>
+      </div>
+    </div>`;
+  }).join("") + `</div>`;
+}
+
+/* Mini per-peer latency history: line for successes, red ticks for failures. */
+function sparkline(history, color) {
+  if (!history.length)
+    return `<svg class="spark" viewBox="0 0 240 48" preserveAspectRatio="none"></svg>`;
+  const W = 240, H = 48, pad = 5;
+  const okVals = history.filter(h => h.ok && h.latency_ms != null).map(h => h.latency_ms);
+  const yMax = (okVals.length ? Math.max(...okVals) : 1) * 1.15 || 1;
+  const n = history.length;
+  const x = i => pad + (W - 2 * pad) * (n === 1 ? 0.5 : i / (n - 1));
+  const y = v => H - pad - (H - 2 * pad) * (v / yMax);
+  let pts = "", dots = "", ticks = "";
+  history.forEach((h, i) => {
+    if (h.ok && h.latency_ms != null) {
+      pts += `${x(i).toFixed(1)},${y(h.latency_ms).toFixed(1)} `;
+      dots += `<circle cx="${x(i).toFixed(1)}" cy="${y(h.latency_ms).toFixed(1)}" r="2" fill="${color}"/>`;
+    } else {
+      ticks += `<line x1="${x(i).toFixed(1)}" y1="${H - pad - 7}" x2="${x(i).toFixed(1)}" y2="${H - pad}" stroke="var(--red)" stroke-width="2"/>`;
+    }
+  });
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    ${pts ? `<polyline points="${pts.trim()}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round"/>` : ""}
+    ${dots}${ticks}
+  </svg>`;
+}
+
+/* Combined trend chart: one polyline per peer over its own recent samples. */
+function renderTrend(d) {
+  const chart = $("#trendChart"), legend = $("#trendLegend");
+  const series = d.peers
+    .map((p, i) => ({ id: p.id, color: PALETTE[i % PALETTE.length],
+                      hist: (p.history || []).filter(h => h.ok && h.latency_ms != null) }))
+    .filter(s => s.hist.length);
+  legend.innerHTML = d.peers.map((p, i) =>
+    `<span><span class="sw" style="background:${PALETTE[i % PALETTE.length]};"></span>${esc(p.id)}</span>`).join("");
+  if (!series.length) {
+    chart.innerHTML = `<div class="empty">暂无成功探测记录，点击「立即探测全部」开始采集</div>`;
+    return;
+  }
+  const W = 900, H = 220, pad = { l: 52, r: 14, t: 14, b: 26 };
+  const maxLen = Math.max(...series.map(s => s.hist.length));
+  const yMax = Math.max(...series.flatMap(s => s.hist.map(h => h.latency_ms))) * 1.15 || 1;
+  const x = i => pad.l + (W - pad.l - pad.r) * (maxLen === 1 ? 0.5 : i / (maxLen - 1));
+  const y = v => pad.t + (H - pad.t - pad.b) * (1 - v / yMax);
+  let grid = "";
+  for (let g = 0; g <= 4; g++) {
+    const yy = pad.t + (H - pad.t - pad.b) * (g / 4);
+    const val = yMax * (1 - g / 4);
+    grid += `<line x1="${pad.l}" y1="${yy}" x2="${W - pad.r}" y2="${yy}" stroke="var(--border)" stroke-width="1"/>`;
+    grid += `<text x="${pad.l - 6}" y="${yy + 4}" text-anchor="end" font-size="9" fill="var(--faint)">${val >= 100 ? Math.round(val) : val.toFixed(1)}</text>`;
+  }
+  grid += `<text x="${pad.l}" y="${H - 6}" font-size="9" fill="var(--faint)">较早</text>`;
+  grid += `<text x="${W - pad.r}" y="${H - 6}" text-anchor="end" font-size="9" fill="var(--faint)">最新</text>`;
+  const lines = series.map(s => {
+    const off = maxLen - s.hist.length; // right-align shorter histories
+    const pts = s.hist.map((h, i) => `${x(off + i).toFixed(1)},${y(h.latency_ms).toFixed(1)}`).join(" ");
+    const dots = s.hist.map((h, i) =>
+      `<circle cx="${x(off + i).toFixed(1)}" cy="${y(h.latency_ms).toFixed(1)}" r="2" fill="${s.color}"/>`).join("");
+    return `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round"/>${dots}`;
+  }).join("");
+  chart.innerHTML = `<svg viewBox="0 0 ${W} ${H}">${grid}${lines}</svg>`;
+}
+
+document.addEventListener("DOMContentLoaded", init);
+</script>
+</body>
+</html>

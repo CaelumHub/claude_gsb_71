@@ -20,7 +20,7 @@ from .templates import template_catalog, get_template, TEMPLATES
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "frontend")
 PAGES = ["index", "wallet", "txpool", "explorer", "deploy", "interact",
-         "nodes", "network", "stats", "admin", "templates"]
+         "nodes", "network", "reachability", "stats", "admin", "templates"]
 
 
 def _json(payload, status=200):
@@ -101,8 +101,10 @@ def create_app(node):
     @app.post("/api/network/remove_peer")
     def remove_peer():
         data = request.get_json(force=True, silent=True) or {}
-        ok = node.peers.remove(data.get("host", "127.0.0.1"),
-                               int(data.get("port", 0)))
+        host, port = data.get("host", "127.0.0.1"), int(data.get("port", 0))
+        ok = node.peers.remove(host, port)
+        if ok:
+            node.reachability.drop(host, port)
         return _json({"ok": ok})
 
     @app.get("/api/network/config")
@@ -138,6 +140,27 @@ def create_app(node):
     def trigger_sync():
         summary = node.sync_with_peers()
         return _json({"ok": True, "summary": summary})
+
+    # ------------------------------------------------------------------ #
+    # Neighbour reachability probing (read-only health checks)
+    # ------------------------------------------------------------------ #
+    @app.get("/api/network/probe")
+    def probe_report():
+        return _json(node.reachability.report())
+
+    @app.post("/api/network/probe")
+    def probe_all():
+        results = node.reachability.probe_all()
+        return _json({"ok": True, "results": results,
+                      "report": node.reachability.report()})
+
+    @app.post("/api/network/probe/<host>/<int:port>")
+    def probe_one(host, port):
+        result = node.reachability.probe_peer(host, port)
+        if result is None:
+            return _json({"ok": False, "error": "peer not found"}, 404)
+        return _json({"ok": True, "result": result,
+                      "report": node.reachability.report()})
 
     # ================================================================== #
     # Wallet

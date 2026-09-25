@@ -15,6 +15,7 @@ from .blockchain import Blockchain
 from .config import (COINBASE_REWARD, CONTRACT_EVENT_DEDUP_KEY,
                      MAX_TX_PER_BLOCK, MINING_INTERVAL)
 from .p2p import PeerRegistry, dial_peer, http_get_json, http_post_json
+from .reachability import ReachabilityMonitor
 from .state import ZERO_ADDRESS
 from .storage import DataPaths, atomic_write_json, read_json
 from .transaction import (Transaction, create_call, create_coinbase,
@@ -37,6 +38,9 @@ class Node:
         self.txpool = TxPool(max_size=cfg.get("MAX_TX_PER_BLOCK", 1000))
         self.wallets = WalletStore(self.paths.wallets_path)
         self.peers = PeerRegistry()
+        # Reachability probing keeps its own history; it never mutates Peer
+        # bookkeeping, so status views / sync stay unaffected.
+        self.reachability = ReachabilityMonitor(self.peers)
 
         self._mining = False
         self._mine_thread = None
